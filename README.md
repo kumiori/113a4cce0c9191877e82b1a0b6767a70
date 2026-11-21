@@ -13,12 +13,10 @@ same history.
 
 ## Install and run
 
-Python 3.11 or later. The core package uses the Python standard library.
-Clone this standalone repository and install from its root:
+Python 3.11 or later. The package uses the Python standard library. Install from
+the directory containing this README.
 
 ```sh
-git clone https://github.com/kumiori/113a4cce0c9191877e82b1a0b6767a70.git game-gamer
-cd game-gamer
 python -m pip install .
 python examples/minimal_collective/main.py
 ```
@@ -30,7 +28,7 @@ serialises the history, restores it and checks the complete projection.
 ## Optional terminal
 
 ```sh
-python -m pip install '.[tui]'
+python -m pip install 'game-gamer[tui]'
 game-gamer play examples/minimal_collective/world.json --db rehearsal.sqlite
 ```
 
@@ -38,30 +36,12 @@ Use the example from a source checkout or unpacked source distribution.
 See the [terminal guide](docs/TUI.md) for controls, the independent playthrough
 and the reusable widget API.
 
-## Reconstruction and practice components
-
-The package provides attributed recollection claims, disputes and retractions,
-historical source validation, provenance-preserving network layers, participant
-profiles, search and filters, and deterministic terminal portraits. Curator
-corrections and reversible identity merges preserve the original records.
-Configured practice sessions run in isolated collectives through the same public
-action API. Montréal rosters, source data and application-specific flows belong
-to the consuming host.
-
-## Development
-
-```sh
-python -m pip install '.[test,tui]' build
-python -m pytest -q
-python -m build
-```
-
-Tests cover authority, exact retries, concurrency, persistence, replay, claim
-identity, graph provenance, reusable practice sessions and terminal interaction.
-See [the source handoff record](docs/SOURCE_HANDOFF.md) for validation and the
-remaining application-level release gates.
-
 ## Public API
+
+Each release publishes a machine-readable capabilities manifest. Use
+`game-gamer capabilities` or `game_gamer.get_capabilities()` to inspect the
+installed artifact. See [release propagation](docs/RELEASES.md) for immutable
+assets and review-only consumer upgrade proposals.
 
 ```python
 import json
@@ -97,3 +77,33 @@ actions in this release have simulation authority.
 See the [semantic model](docs/SEMANTIC_MODEL.md),
 [transition contract](docs/STATE_TRANSITIONS.md),
 [governance](docs/GOVERNANCE.md) and [persistence](docs/PERSISTENCE.md).
+
+## Inspect the implemented decision graph
+
+```sh
+python -m game_gamer inspect decisions --format json --output decisions.json
+python -m game_gamer inspect decisions --format mermaid --output decisions.mmd
+python -m game_gamer inspect decisions --format dot --output decisions.dot
+python -m game_gamer inspect decisions --audit --audit-output decision_audit.json
+```
+
+Extraction is read-only and deterministic, including without the terminal extra.
+Engine schemas/rules and registered interface source drive the same canonical
+graph. Contextual availability, scope selection, observed test coverage and release
+comparison are described in [Decision inspection](docs/DECISION_INSPECTION.md).
+Imperative branches that remain unresolved are explicit audit findings.
+
+The reconstruction host now exposes an executable transition contract with stable
+IDs, structured UI traces and passed-test release evidence. Use
+`--scope exercise.reconstruct --view lifecycle` when Commons is installed.
+`--filter uninstrumented` and the other finding filters keep remaining source-only
+gaps visible. A scoped release gate never certifies the complete application;
+see [the verification extension](docs/DECISION_INSPECTION.md#executable-transition-contracts-and-scoped-release-verification).
+
+## Application extensions
+
+Game-Gamer 0.3.0 exposes a versioned extension contract for registered commands,
+policy hooks, initial state and projections. See [the public extension API](docs/EXTENSIONS.md)
+and the independently packaged [Lantern Club example](examples/lantern-club/).
+World-driven play is the default. Missions are optional mutable world objects,
+and target locking adds explicit constraints to the same runtime.

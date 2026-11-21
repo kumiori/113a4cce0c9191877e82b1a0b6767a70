@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "game-gamer"
-version = "0.2.0"
+version = "0.3.1"
 description = "A UI-independent engine for collective decision-making"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -14,11 +14,8 @@ dependencies = []
 game-gamer = "game_gamer.cli:main"
 
 [project.optional-dependencies]
-tui = ["wcwidth>=0.2.12,<1"]
+tui = ["wcwidth>=0.2.12,<1", "PyYAML>=6,<7"]
 test = ["pytest>=8"]
-
-[project.urls]
-Repository = "https://github.com/kumiori/113a4cce0c9191877e82b1a0b6767a70"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -27,4 +24,6 @@ where = ["src"]
 testpaths = ["tests"]
 
 [tool.setuptools.package-data]
+"game_gamer" = ["capabilities.json"]
 "game_gamer.exercises" = ["*.json"]
+"game_gamer.tui" = ["locales/*.yaml"]
