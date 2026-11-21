@@ -25,8 +25,8 @@ python -m release.publish /tmp/game-gamer-release
 
 The publisher checks the repository immutability setting, creates a new draft,
 uploads the complete asset set, publishes it and checks `immutable=true` in the
-result. Existing releases are never overwritten. Version tags also have a release
-workflow. Its preflight needs Administration read access to inspect the immutable
+result. Existing releases are never overwritten. A maintainer can also dispatch
+the release workflow against a version tag. Its preflight needs Administration read access to inspect the immutable
 setting and Contents write access to publish: configure a narrowly scoped
 `RELEASE_TOKEN` when the default Actions token cannot perform that check. Without
 sufficient permission it fails closed. Maintainers can use the same CLI with
