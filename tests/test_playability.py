@@ -112,3 +112,41 @@ def test_cached_store_reads_are_detached_and_validate_changed_history(tmp_path):
         connection.execute('UPDATE events SET payload=? WHERE sequence=1', (json.dumps(entry),))
     with pytest.raises(ValueError):
         store.load()
+
+
+def test_opening_is_nonblocking_timed_and_respects_reduced_motion(monkeypatch):
+    from types import SimpleNamespace
+    from game_gamer.tui import opening
+    from game_gamer.tui.navigation import Route
+    from game_gamer.tui.reconstruction import NetworkReconstructionExercise
+
+    exercise = NetworkReconstructionExercise('demo', 'forum', 'Reconstruct', 'A fictional forum', ('Remember together',))
+    port = SimpleNamespace(poll_key=lambda milliseconds: None)
+    clock = [0.0]
+    monkeypatch.delenv('COMMONS_REDUCED_MOTION', raising=False)
+    monkeypatch.setattr(opening, 'monotonic', lambda: clock[0])
+    route = Route('reconstruction_intro')
+    first = opening.opening_screen(exercise, route, port)
+    assert first.refresh_interval_ms == 80
+    clock[0] = 2.6
+    final = opening.opening_screen(exercise, route, port)
+    assert final.entries == [('BEGIN RECONSTRUCTION', 'begin')]
+    assert route.extra['opening_finished']
+    monkeypatch.setenv('COMMONS_REDUCED_MOTION', '1')
+    reduced = opening.opening_screen(exercise, Route('reconstruction_intro'), port)
+    assert reduced.entries == [('BEGIN RECONSTRUCTION', 'begin')]
+
+
+def test_store_cache_keeps_exact_retries_idempotent_after_a_new_commit(tmp_path):
+    from game_gamer.persistence.sqlite import SQLiteStore
+    from game_gamer.runtime.engine import CollectiveEngine
+    game = start(tmp_path/'retry.sqlite')
+    store = SQLiteStore(tmp_path/'retry.sqlite', CollectiveEngine)
+    store.load()
+    command = {'key': 'record-once', 'kind': 'recall_connection', 'actor': 'a',
+               'target_id': 'b', 'context_id': 'forum'}
+    first = store.submit(command, expected_version=1)
+    assert first['ok']
+    store.load()
+    assert store.submit(command, expected_version=1)['action_id'] == first['action_id']
+    assert store.revision() == 2

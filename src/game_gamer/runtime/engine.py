@@ -8,8 +8,9 @@ import json
 from .transactions import WorldEngine
 from ..model import (TABLES, ENTITY_TABLES, Agreement, AgreementVersion, Approval,
                     Commitment, DomainError, require)
-from . import invitations, reconstruction, curation
+from . import invitations, reconstruction, curation, curation_requests, missions, mission_lifecycle
 from .governance import evaluate_authorisation
+from ..extensions import EXTENSION_RECORD, extension_from_events, extension_record, resolve_extension
 
 
 def digest(value):
@@ -36,6 +37,9 @@ FIELDS = {
     **invitations.FIELDS,
     **reconstruction.FIELDS,
     **curation.FIELDS,
+    **curation_requests.FIELDS,
+    **missions.FIELDS,
+    **mission_lifecycle.FIELDS,
     'draft': ({'id', 'label', 'parties', 'objective_id', 'terms', 'resources', 'valid_until', 'policy_id', 'verification'}, {'interaction_context'}),
     'propose': ({'id', 'label', 'parties', 'objective_id', 'terms', 'resources', 'valid_until', 'policy_id', 'verification'}, {'interaction_context'}),
     'publish_proposal': ({'agreement_id', 'version'}, set()),
@@ -63,8 +67,61 @@ TERMINAL = {'rejected', 'withdrawn', 'expired', 'terminated'}
 
 class CollectiveEngine(WorldEngine):
     tables = TABLES
+    fields = FIELDS
+    extension_fields = {}
     entity_tables = ENTITY_TABLES
     epoch = datetime.fromisoformat('2026-11-02T00:00:00+00:00')
+
+    def __init__(self, *, extension=None):
+        super().__init__()
+        self.extension = resolve_extension(extension)
+        self.fields = dict(type(self).fields)
+        if self.extension:
+            self.fields.update({name: (spec.required, spec.optional)
+                                for name, spec in self.extension.commands.items()})
+
+    @classmethod
+    def from_log(cls, entries, *, extension=None):
+        entries = list(entries)
+        extension = extension_from_events(entries, extension)
+        game = cls(extension=extension)
+        if game.extension:
+            extension_from_events(entries, game.extension)
+        game._replay_events(entries)
+        return game
+
+    def snapshot(self):
+        with self._lock:
+            game = type(self)(extension=self.extension)
+            game._world = deepcopy(self._world)
+            game._log = deepcopy(self._log)
+            return game
+
+    def replay(self):
+        with self._lock:
+            return type(self).from_log(self._log, extension=self.extension)
+
+    def transaction(self):
+        """Lock trusted host setup operations using the same runtime commit boundary."""
+        return self._lock
+
+    def validate_world(self, world):
+        """Check that a candidate can be represented by the authoritative event schema."""
+        require(isinstance(world, dict) and set(world) == set(self.tables), 'invalid_world_tables')
+        require(all(isinstance(table, dict) for table in world.values()), 'invalid_world_tables')
+        for name, table in world.items():
+            require(self._world[name].keys() <= table.keys(), 'state_deletion_unsupported')
+            require(all(isinstance(ident, str) and isinstance(record, dict) and record.get('id') == ident
+                        for ident, record in table.items()), 'invalid_world_record')
+
+    def record_transition(self, before, after, summary, *, actor='system'):
+        """Append trusted import/setup state with an optimistic before-state check."""
+        with self._lock:
+            require(before == self._world, 'stale_import_state')
+            self.validate_world(after)
+            require(before['configuration'].get(EXTENSION_RECORD) == after['configuration'].get(EXTENSION_RECORD),
+                    'extension_metadata_is_immutable')
+            return self._commit(before, after, summary, actor=actor)
 
     @staticmethod
     def _result(event):
@@ -82,11 +139,16 @@ class CollectiveEngine(WorldEngine):
             'authorization': deepcopy(action.get('authorization', {
                 'decision': 'allowed', 'rule': {'ecosystem.imported': 'read_only_ecosystem_import',
                     'reconstruction.sources_imported': 'trusted_historical_source_import',
+                    'missions.installed': 'trusted_mission_pack_installation',
+                    'curator.access_granted': 'trusted_local_curator_provisioning',
+                    'curator.access_revoked': 'trusted_local_curator_provisioning',
                     'identity_binding.requested': 'pending_identity_claim'}.get(event['kind'], 'synthetic_scenario_initialisation'),
                 'actor_id': 'system'})),
         }
 
     def _validate_event(self, entry, before):
+        resolved = extension_from_events([entry], self.extension)
+        require(resolved is self.extension, 'required_extension_not_active')
         commit = entry.get('commit', {})
         require(commit.get('previous_state') == digest(before), 'invalid_commit_chain')
         require(commit.get('previous_version') == entry['sequence'] - 1 and
@@ -106,8 +168,8 @@ class CollectiveEngine(WorldEngine):
             text(command.get('kind'), 'unknown_command')
             text(command.get('actor'), 'actor_required')
             kind = command['kind']
-            require(kind in FIELDS, 'unknown_command')
-            required, optional = FIELDS[kind]
+            require(kind in self.fields, 'unknown_command')
+            required, optional = self.fields[kind]
             require(required <= command.keys(), 'missing_field')
             require(not (command.keys() - required - optional - {'key', 'kind', 'actor', 'session'}), 'unsupported_field')
             if 'session' in command:
@@ -129,7 +191,7 @@ class CollectiveEngine(WorldEngine):
             require(curation.canonical(self._world, command['actor']) == command['actor'], 'canonical_identity_required')
             require(curation.state(self._world).get('visibility', {}).get(command['actor'], {}).get('value') != 'archived',
                     'archived_actor')
-            if kind not in curation.FIELDS:
+            if kind not in curation.FIELDS and kind not in curation_requests.FIELDS:
                 for field in ('target_id', 'recipient_id'):
                     target = command.get(field)
                     if target is not None:
@@ -220,6 +282,12 @@ class CollectiveEngine(WorldEngine):
                   'authorization': authorization, 'target_ids': []}
         agreement = version = None
         summary = f'{kind}.accepted'
+        context = {'actor': actor, 'timestamp': timestamp, 'sequence': seq, 'action': action}
+        mission_lifecycle.constrain(world, command)
+        if self.extension:
+            for policy in self.extension.policies:
+                if policy.before:
+                    policy.before(deepcopy(world), deepcopy(command), **context)
         if 'agreement_id' in command:
             text(command['agreement_id'])
             agreement = world['agreements'].get(command['agreement_id'])
@@ -245,10 +313,23 @@ class CollectiveEngine(WorldEngine):
                                       'status': 'reported', 'provenance': {'kind': 'synthetic_gameplay'}, **extra}
             return eid
 
-        if kind in invitations.KINDS:
+        if self.extension and kind in self.extension.commands:
+            spec = self.extension.commands[kind]
+            spec.handler(world, command, **context)
+            if EXTENSION_RECORD not in world['configuration']:
+                world['configuration'][EXTENSION_RECORD] = extension_record(self.extension)
+        elif kind in mission_lifecycle.FIELDS:
+            mission_lifecycle.prepare(world, command, **context)
+        elif kind in invitations.KINDS:
             summary = invitations.prepare(world, command, actor=actor, timestamp=timestamp, sequence=seq, action=action)
+        elif kind in missions.FIELDS:
+            missions.prepare(world, command, actor=actor, timestamp=timestamp, sequence=seq, action=action)
+        elif kind in curation_requests.FIELDS:
+            curation_requests.prepare(world, command, actor=actor, timestamp=timestamp, sequence=seq, action=action)
         elif kind in curation.FIELDS:
             curation.prepare(world, command, actor=actor, timestamp=timestamp, sequence=seq, action=action)
+        elif kind in self.extension_fields:
+            self._prepare_extension(world, command, actor=actor, timestamp=timestamp, sequence=seq, action=action)
         elif kind in reconstruction.FIELDS:
             reconstruction.prepare(world, command, actor=actor, timestamp=timestamp, sequence=seq, action=action)
         elif kind in {'draft', 'propose'}:
@@ -453,6 +534,17 @@ class CollectiveEngine(WorldEngine):
             agreements = [a for a in world['agreements'].values() if a['objective_id'] == objective['id']]
             objective['support_ids'] = [a['id'] for a in agreements if a['outcome_status'] == 'verified']
             objective['status'] = 'verified' if len(objective['support_ids']) >= objective['success']['verified_agreements'] else 'open'
+        if self.extension:
+            for policy in self.extension.policies:
+                if policy.after:
+                    original = deepcopy(world)
+                    policy.after(world, deepcopy(command), **context)
+                    if original != world and EXTENSION_RECORD not in world['configuration']:
+                        world['configuration'][EXTENSION_RECORD] = extension_record(self.extension)
+        require(world['configuration'].get(EXTENSION_RECORD) == (
+            extension_record(self.extension) if self.extension and EXTENSION_RECORD in world['configuration']
+            else self.get_world()['configuration'].get(EXTENSION_RECORD)), 'extension_metadata_is_immutable')
+        self.validate_world(world)
         return world, action_id, summary
 
     def project(self, view='now', *, at=None, time=None):
@@ -465,8 +557,13 @@ class CollectiveEngine(WorldEngine):
                     return deepcopy(entries)
         if view == 'world':
             return world
+        if self.extension and view in self.extension.projections:
+            return deepcopy(self.extension.projections[view](world))
         if view == 'network':
             return self._network(world)
+        if view == 'missions':
+            from ..projections.missions import project_mission
+            return [project_mission(world, ident) for ident in missions.definitions(world)]
         if view in self.tables:
             return list(world[view].values())
         if view == 'now':
@@ -476,9 +573,13 @@ class CollectiveEngine(WorldEngine):
 
     def derive_possibilities(self, world=None):
         world = world if world is not None else self.get_world()
+        if self.extension and 'possibilities' in self.extension.projections:
+            return deepcopy(self.extension.projections['possibilities'](world))
         from ..projections.network import potential_complementarities
         return potential_complementarities(world)
 
     def _network(self, world):
+        if self.extension and 'network' in self.extension.projections:
+            return deepcopy(self.extension.projections['network'](world))
         from ..projections.network import network
         return network(world, possibilities=self.derive_possibilities(world))

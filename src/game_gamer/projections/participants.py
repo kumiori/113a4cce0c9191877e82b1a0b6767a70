@@ -22,6 +22,7 @@ class ParticipantProfile:
     needs: tuple[str, ...] = ()
     offers_state: str | None = None
     needs_state: str | None = None
+    domains: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -46,12 +47,12 @@ class ParticipantDirectory:
         for relation in world['relationships'].values():
             if (relation['kind'] == 'affiliated_with' and relation['status'] != 'inferred'
                     and actors.get(relation['target_id'], {}).get('kind') == 'organisation'):
-                organisations[canonical(world, relation['source_id'])].add(actors[relation['target_id']]['label'])
+                organisations[canonical(world, relation['source_id'])].add(actors[canonical(world, relation['target_id'])]['label'])
         for table, values in (('capacities', offers), ('needs', needs)):
             current = questionnaire.get(table, {})
             for actor_id, observation in current.items():
                 values[canonical(world, actor_id)].update(observation['domains'])
-                states[table][actor_id] = observation['state']
+                states[table][canonical(world, actor_id)] = observation['state']
             for item in world[table].values():
                 actor_id = canonical(world, item['actor_id'])
                 superseded = actor_id in current and item.get('provenance', {}).get('kind') != 'player_declaration'
@@ -61,14 +62,25 @@ class ParticipantDirectory:
         for record in world['evidence'].values():
             if record['kind'] == 'participant_statement' and (context_id is None or record['context_id'] == context_id):
                 statements[record['actor_id']].add(record['statement'])
-        self.profiles = {
-            key: ParticipantProfile(key, labels.get(key, actor['label']), actor['kind'],
-                                    tuple(sorted(organisations[key], key=_fold)), ((actor['profile_role'],) if actor.get('profile_role') else tuple(actor.get('roles', []))),
-                                    actor.get('motivation') or ('\n'.join(sorted(statements[key])) or None), tuple(sorted(offers[key], key=_fold)),
-                                    tuple(sorted(needs[key], key=_fold)), states['capacities'].get(key), states['needs'].get(key))
-            for key, actor in actors.items() if actor['status'] == 'active'
-            and visible(world, key) and (actor_ids is None or key in actor_ids)
-        }
+        self.profiles = {}
+        for key, actor in actors.items():
+            if actor['status'] != 'active' or not visible(world, key) or (actor_ids is not None and key not in actor_ids):
+                continue
+            roles = tuple(actor.get('roles', []))
+            if 'profile_role' in actor:
+                roles = (actor['profile_role'],) if actor['profile_role'] else ()
+            motivation = '\n'.join(sorted(statements[key])) or None
+            if 'motivation' in actor:
+                motivation = actor['motivation'] or None
+            organisation = ((actor['profile_organisation'],) if actor['profile_organisation'] else ()) if 'profile_organisation' in actor else tuple(sorted(organisations[key], key=_fold))
+            self.profiles[key] = ParticipantProfile(
+                id=key, name=labels.get(key, actor['label']), actor_type=actor['kind'],
+                organisations=organisation, roles=roles,
+                motivation=motivation, offers=tuple(actor.get('profile_offers', sorted(offers[key], key=_fold))),
+                needs=tuple(actor.get('profile_needs', sorted(needs[key], key=_fold))),
+                offers_state='answered' if 'profile_offers' in actor else states['capacities'].get(key),
+                needs_state='answered' if 'profile_needs' in actor else states['needs'].get(key),
+                domains=tuple(actor.get('profile_domains', ())))
         self.recalled_by = defaultdict(set)
         for record in world['relationships'].values():
             if record['kind'] == 'recollection_claim' and record['status'] != 'retracted' and (

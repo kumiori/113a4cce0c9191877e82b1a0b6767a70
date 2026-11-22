@@ -4,6 +4,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta
 from threading import RLock
 from ..history.events import Mutation
+from ..transitions import observe_submission
 
 
 class WorldEngine:
@@ -68,6 +69,7 @@ class WorldEngine:
                      e['command']['key'] == command.get('key')), None)
 
 
+    @observe_submission
     def submit(self, command, *, expected_version=None):
         with self._lock:
             if expected_version is not None and expected_version != len(self._log):

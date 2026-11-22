@@ -1,18 +1,44 @@
 """Prepare and render a focused view of a read-only collective graph."""
+
+import math
+import unicodedata
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
 from hashlib import sha256
-import math
-import unicodedata
 
+from .i18n import message_key, t
 from .objects import OBJECTS
-from .text import display_width, folded, label as node_label
-from .renderers.hack_terminal import raster, project
+from .renderers.hack_terminal import project, raster
+from .text import display_width, folded
+from .text import label as node_label
+from .visual import NAVIGATION, SECONDARY
+
+OBJECT_TYPES = {
+    'All types': None, 'People': 'person', 'Organisations': 'organisation',
+    'Resources': 'resource', 'Relationships': 'relationships', 'Agreements': 'agreement',
+    'Capacities': 'capacity', 'Needs': 'need', 'Evidence': 'evidence',
+    'Objectives': 'objective', 'Policies': 'policy', 'Invitations': 'invitation',
+}
+
+OBJECT_TYPE_MESSAGES = {
+    None: message_key('network.object_types.all'),
+    'person': message_key('objects.person.plural'),
+    'organisation': message_key('objects.organisation.plural'),
+    'resource': message_key('objects.resource.plural'),
+    'relationships': message_key('network.object_types.relationships'),
+    'agreement': message_key('network.object_types.agreements'),
+    'capacity': message_key('objects.capacity.plural'),
+    'need': message_key('objects.need.plural'),
+    'evidence': message_key('objects.evidence.label'),
+    'objective': message_key('objects.objective.plural'),
+    'policy': message_key('network.object_types.policies'),
+    'invitation': message_key('objects.invitation.plural'),
+}
 
 PRIORITY = {'invitation':0,'agreement':0,'objective':1,'policy':2,'resource':3,'person':4,'organisation':5,
             'evidence':6,'capacity':7,'need':8}
-LAYERS = {'inferred':('#8caac4','dotted'),'documented':('#a3bd95','solid'),
+LAYERS = {'inferred':('#71889f','dotted'),'documented':('#a3bd95','solid'),
           'declared':('#c4a7e7','solid'),'agreement':('#d88356','solid'),
           'institutional':('#eee8d5','solid'),'invitation':('#e8b65e','dotted'),
           'connection':('#a3bd95','solid'),
@@ -21,50 +47,88 @@ LAYERS = {'inferred':('#8caac4','dotted'),'documented':('#a3bd95','solid'),
           'prior_relationship':('#d7b494','solid'), 'reconstruction_invitation':('#e8b65e','dashed')}
 
 RECONSTRUCTION_CATEGORIES = {
-    'historical_whiteboard': 'Whiteboard evidence', 'recollection': 'One-sided recollection',
-    'corroborated': 'Mutual recollection', 'disputed_recollection': 'Disputed recollection',
-    'prior_relationship': 'Prior relationship declaration',
+    'historical_whiteboard': message_key('network.layers.whiteboard'), 'recollection': message_key('network.layers.one_sided'),
+    'corroborated': message_key('network.layers.mutual'), 'disputed_recollection': message_key('network.layers.disputed'),
+    'prior_relationship': message_key('network.layers.prior_relationship'),
 }
 
-CATEGORIES = ('Recorded affiliations','Other documented relationships','Inferred complementarities',
-              'Pending invitations','Accepted connections','Proposed agreements','Accepted or active agreements','Verified outcomes', *RECONSTRUCTION_CATEGORIES.values())
+# Historical category values are stable graph filter inputs.
+_CATEGORY_IDS = {
+    message_key('network.layers.affiliations'): 'Recorded affiliations',
+    message_key('network.layers.documented'): 'Other documented relationships',
+    message_key('network.layers.inferred'): 'Inferred complementarities',
+    message_key('network.layers.pending_invitations'): 'Pending invitations',
+    message_key('network.layers.accepted_connections'): 'Accepted connections',
+    message_key('network.layers.proposed_agreements'): 'Proposed agreements',
+    message_key('network.layers.accepted_agreements'): 'Accepted or active agreements',
+    message_key('network.layers.verified_outcomes'): 'Verified outcomes',
+    message_key('network.layers.whiteboard'): 'Whiteboard evidence',
+    message_key('network.layers.one_sided'): 'One-sided recollection',
+    message_key('network.layers.mutual'): 'Mutual recollection',
+    message_key('network.layers.disputed'): 'Disputed recollection',
+    message_key('network.layers.prior_relationship'): 'Prior relationship declaration',
+    message_key('history.title'): 'History',
+}
+_CATEGORY_KEYS = {category: key for key, category in _CATEGORY_IDS.items()}
+CATEGORIES = tuple(category for category in _CATEGORY_KEYS if category != 'History')
 
 
-def edge_category(edge,lookup):
+def _category_key(edge, lookup):
     if edge['layer'] in RECONSTRUCTION_CATEGORIES:
         return RECONSTRUCTION_CATEGORIES[edge['layer']]
     if edge['layer'] == 'reconstruction_invitation':
-        return 'Pending invitations'
+        return message_key('network.layers.pending_invitations')
     if edge['layer']=='invitation':
-        return 'Pending invitations' if edge.get('status')=='sent' else 'Accepted connections' if edge.get('status')=='accepted' else 'History'
-    if edge['layer']=='connection':return 'Accepted connections'
-    if edge['layer']=='inferred':return 'Inferred complementarities'
+        return message_key('network.layers.pending_invitations') if edge.get('status')=='sent' else message_key('network.layers.accepted_connections') if edge.get('status')=='accepted' else message_key('history.title')
+    if edge['layer']=='connection':return message_key('network.layers.accepted_connections')
+    if edge['layer']=='inferred':return message_key('network.layers.inferred')
     agreement=next((lookup.get(edge[key],{}) for key in ('source_id','target_id') if lookup.get(edge[key],{}).get('kind')=='agreement'),None)
     if agreement:
-        if agreement['outcome_status']=='verified':return 'Verified outcomes'
-        return 'Accepted or active agreements' if agreement['status'] in {'accepted','authorized','active','fulfilled'} else 'Proposed agreements'
-    if edge['kind']=='affiliated_with':return 'Recorded affiliations'
-    return 'Other documented relationships'
+        if agreement['outcome_status']=='verified':return message_key('network.layers.verified_outcomes')
+        return message_key('network.layers.accepted_agreements') if agreement['status'] in {'accepted','authorized','active','fulfilled'} else message_key('network.layers.proposed_agreements')
+    if edge['kind']=='affiliated_with':return message_key('network.layers.affiliations')
+    return message_key('network.layers.documented')
 
 
 
-def focus_graph(graph, centre, *, related=None, query='', offset=0, limit=12, scope='neighbourhood', categories=None, three_d=False, labeler=node_label):
+def object_type_label(kind):
+    return t(OBJECT_TYPE_MESSAGES[kind])
+
+
+def edge_category(edge, lookup, *, layer_categories=None):
+    if layer_categories and edge['layer'] in layer_categories:
+        return layer_categories[edge['layer']]
+    return _CATEGORY_IDS[_category_key(edge, lookup)]
+
+
+def category_label(category):
+    key = _CATEGORY_KEYS.get(category)
+    return t(key) if key else category
+
+
+
+def focus_graph(graph, centre, *, related=None, query='', offset=0, limit=12, scope='neighbourhood', categories=None, three_d=False, labeler=node_label, object_type=None, layer_styles=None, layer_categories=None):
     """All incident relations remain available; pages disclose visual reduction.
 
     Party contracts retain their policy/objective/resources even though those
     are two hops from the actor. Strong inferred matches do not crowd them out.
     """
+    styles = {**LAYERS, **(layer_styles or graph.get('layer_styles', {}))}
+    layer_categories = layer_categories or graph.get('layer_categories', {})
     full_node_count=len(graph['nodes']); full_edge_count=len(graph['edges'])
     lookup = {n['id']:n for n in graph['nodes']}
     actor_ids = sorted(key for key, node in lookup.items() if node['kind'] in {'person', 'organisation'})
     incident = {e[key] for e in graph['edges'] for key in ('source_id', 'target_id')}
     if categories is not None or scope=='connections':
-        edges=[e for e in graph['edges'] if (categories is None or edge_category(e,lookup) in categories)
+        edges=[e for e in graph['edges'] if (categories is None or edge_category(e, lookup, layer_categories=layer_categories) in categories)
                and (scope!='connections' or e['layer'] in {'invitation','connection'})]
         ids={e[k] for e in edges for k in ('source_id','target_id')}|{centre}
         graph={'nodes':[n for n in graph['nodes'] if n['id'] in ids],'edges':edges}
     if centre not in lookup:
         return {'nodes':[],'edges':[],'total':0,'offset':0,'centre':centre}
+    if object_type == 'relationships':
+        relational = [edge for edge in graph['edges'] if edge['layer'] not in {'institutional', 'agreement'}]
+        graph = {**graph, 'edges': relational}
     adjacent = {e['target_id'] if e['source_id']==centre else e['source_id'] for e in graph['edges']
                 if centre in (e['source_id'],e['target_id'])}
     contracts = {key for key in adjacent if lookup.get(key,{}).get('kind')=='agreement'}
@@ -75,6 +139,8 @@ def focus_graph(graph, centre, *, related=None, query='', offset=0, limit=12, sc
             adjacent.update((edge['source_id'],edge['target_id']))
     if scope in {'whole','connections'}:adjacent={n['id'] for n in graph['nodes']}
     adjacent.discard(centre)
+    if object_type and object_type != 'relationships':
+        adjacent = {key for key in adjacent if lookup.get(key, {}).get('kind') == object_type}
     ordered = sorted((key for key in adjacent if key in lookup and folded(query) in folded(labeler(lookup[key]))),
         key=lambda key:(0 if key==related else 1,PRIORITY.get(lookup[key]['kind'],99),folded(labeler(lookup[key])),key))
     offset = min(max(0,offset),max(0,((len(ordered)-1)//limit)*limit))
@@ -92,12 +158,12 @@ def focus_graph(graph, centre, *, related=None, query='', offset=0, limit=12, sc
         # Commons projection; unknown source relation direction stays unknown.
         if 'directed' not in records[0] and layer in {'agreement','institutional'}:
             directed = True
-        colour,pattern = LAYERS.get(layer,('#aaaaaa','solid'))
-        epistemic_status=(records[0].get('status','unknown')+' contact invitation') if layer=='invitation' else 'acknowledged contact only' if layer=='connection' else layer
+        colour,pattern = styles.get(layer,('#aaaaaa','solid'))
+        epistemic_status=(records[0].get('status','unknown')+t('network.contact_invitation')) if layer=='invitation' else t('network.acknowledged_contact_only') if layer=='connection' else layer
         if kind=='party_to':
             accepted=records[0].get('status') in {'accepted','authorized','active','fulfilled'}
             colour,pattern=('#a3bd95','solid') if accepted else ('#d88356','dotted')
-            epistemic_status='accepted agreement party' if accepted else 'proposed or inactive contract party'
+            epistemic_status=t('network.accepted_agreement_party') if accepted else t('network.proposed_or_inactive_contract_party')
         edges.append({'id':str(i),'source':source,'target':target,'visual_source':source,'visual_target':target,
             'kind':kind,'layer':layer,'directed':directed,'weight':len(records),
             'colour':colour,'pattern':pattern,'records':records,'epistemic_status':epistemic_status,
@@ -142,29 +208,33 @@ def _fit_points(points, width, height, margin, zoom, perspective):
             for key, (x, y, depth) in points.items()}
 
 
-def _place_labels(lines, nodes, points, labels, plain, labeler):
+def _place_labels(lines, nodes, points, labels, plain, labeler, *, numbered=False, selected=None, show_numbers=True, selected_only=False):
     """Use only clear raster cells. Leave a numbered marker if text cannot fit."""
     height, width = len(lines), len(lines[0])
+    placements = []
     for i, node in enumerate(nodes, 1):
         key = node['id']
-        if key not in points:
+        if key not in points or selected_only and key != selected:
             continue
         x, y = map(round, points[key][:2])
         if not (0 <= x < width and 0 <= y < height):
             continue
-        name = (labels or {}).get(key, labeler(node))
+        name = '' if numbered and key != selected else (labels or {}).get(key, labeler(node))
         if plain:
             name = unicodedata.normalize('NFKD', name).encode('ascii', 'ignore').decode()
         # Raster coordinates are single-cell. Full names are available in Inspect.
         name = ''.join(c for c in name if c.isprintable() and not unicodedata.combining(c)
                        and display_width(c) == 1)
-        full = f'{i} {name}'.rstrip()
+        full = (f'{i} {name}' if show_numbers else name).rstrip()
+        if not full:
+            continue
         mark = '~' if plain else '…'
         cap = min(22, max(4, width//3))
         candidates = [(full if len(full) <= cap else full[:cap-1]+mark)]
         if len(full) > 9:
             candidates.append(full[:8]+mark)
-        candidates.append(str(i))
+        if show_numbers:
+            candidates.append(str(i))
         for label in candidates:
             placed = False
             for row, shift in ((y+1,0),(y-1,0),(y,1),(y,-1),(y+2,0),(y-2,0)):
@@ -173,10 +243,12 @@ def _place_labels(lines, nodes, points, labels, plain, labeler):
                 if 0 <= row < height and 0 <= start <= width-len(label) and all(
                         cell == ' ' for cell in lines[row][start:start+len(label)]):
                     lines[row][start:start+len(label)] = label
+                    placements.append((row, start, len(label), key))
                     placed = True
                     break
             if placed:
                 break
+    return placements
 
 
 def _draw_context(lines, visual, plain, mode):
@@ -240,17 +312,44 @@ def layout_graph(visual, width, height, *, angle=0., zoom=1., yaw=0., pitch=0., 
 
 
 def draw_graph(visual, width, height, *, selected=None, plain=False, angle=0., zoom=1., labels=None,
-               yaw=0., pitch=0., margin=None, background='dim', labeler=node_label):
+               yaw=0., pitch=0., margin=None, background='dim', labeler=node_label, edge_renderer='braille',
+               show_labels=True, show_numbers=None, edge_annotations=True, selected_only=False,
+               emphasise=False):
     if background not in {'hidden', 'dim', 'full'}:
         raise ValueError('unknown_graph_background')
     layout = layout_graph(visual, width, height, angle=angle, zoom=zoom, yaw=yaw, pitch=pitch, margin=margin)
     width, height, points = layout.width, layout.height, layout.points
+    if emphasise or not edge_annotations:
+        edges = []
+        for edge in visual['edges']:
+            edge = dict(edge)
+            if emphasise and selected is not None:
+                incident = selected in (edge['visual_source'], edge['visual_target'])
+                edge.update(colour=NAVIGATION if incident else '#465060', highlighted=incident)
+            if not edge_annotations:
+                edge.update(directed=False, unknown_marker=False)
+            edges.append(edge)
+        nodes = visual['nodes']
+        if emphasise and selected is not None:
+            neighbours = {edge[field] for edge in edges if edge['highlighted']
+                          for field in ('visual_source', 'visual_target')}
+            nodes = [{**node, 'colour': NAVIGATION if node['id'] in neighbours else '#636b75'}
+                     for node in nodes]
+        visual = {**visual, 'edges': edges, 'nodes': nodes}
     frame = {'changes': {'nodes_added': [], 'edges_added': []}}
     image=raster(frame,width,height,layers=set(LAYERS),selected=selected,ascii_only=plain,
-                 visual=visual,projected=points)
+                 visual=visual,projected=points,edge_renderer=edge_renderer)
     lines=[list(line) for line in image.plain.splitlines()]
-    _place_labels(lines,visual['nodes'],points,labels,plain,labeler)
-    spans=[]
+    legacy = show_numbers is None
+    spans = []
+    if show_labels or show_numbers:
+        placements = _place_labels(lines, visual['nodes'], points, labels, plain, labeler,
+                                   numbered=not show_labels or legacy and zoom < .85,
+                                   selected=selected if show_labels else None,
+                                   show_numbers=legacy or show_numbers, selected_only=selected_only)
+        if emphasise and selected is not None:
+            spans.extend((row, column, length, NAVIGATION if key == selected else SECONDARY, None, key == selected)
+                         for row, column, length, key in placements)
     for offset,length,style in image.spans:
         row,column=divmod(offset,width+1)
         spans.append((row,column,length,style.split()[-1],None,'bold' in style))

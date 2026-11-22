@@ -1,12 +1,12 @@
 # Game-Gamer terminal extension
 
-Install `.[tui]` from the repository root to enable the standalone terminal. The extra supplies
+Install `game-gamer[tui]` to enable the standalone terminal. The extra supplies
 `wcwidth` for Unicode column measurement. The semantic API remains usable with
 the base distribution. The full-screen viewport uses curses where supported,
 with a scriptable line viewport for streams and other terminals.
 
 ```sh
-python -m pip install '.[tui]'
+python -m pip install 'game-gamer[tui]'
 game-gamer play examples/minimal_collective/world.json --db rehearsal.sqlite
 ```
 

@@ -113,3 +113,20 @@ def test_canonical_claim_ownership_and_duplicates_follow_author_and_target_merge
         'duplicate_relationship_claim']
     assert submit(other, 'a', 'dispute_recollection', 'canonical-target-dispute', claim_id=target_claim)['ok']
     assert len(other.project('relationships')) == 1
+
+
+def test_merge_suppresses_self_links_and_reversal_restores_them_with_attribution():
+    game = start()
+    assert submit(game, 'duplicate', 'recall_connection', 'first', target_id='a', context_id='forum')['ok']
+    assert submit(game, 'a', 'recall_connection', 'second', target_id='duplicate', context_id='forum')['ok']
+    prior_edges = game.project('network')['edges']
+    preview = merge_preview(game.project('world'), 'duplicate', 'a')
+    assert preview['self_links_hidden'] == 2
+    assert submit(game, 'curator', 'merge_profiles', 'merge', source_id='duplicate', target_id='a',
+                  reference='Verified identity', identity_confirmed=True, preview_digest=preview['digest'])['ok']
+    graph = game.project('network')
+    assert not graph['edges'] and graph['identity_suppressed_edges']
+    merge_id = next(iter(game.project('world')['configuration']['curation']['merges']))
+    assert submit(game, 'curator', 'reverse_profile_merge', 'reverse', merge_id=merge_id,
+                  reference='Correction from participant')['ok']
+    assert game.project('network')['edges'] == prior_edges
